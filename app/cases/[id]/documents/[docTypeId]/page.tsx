@@ -115,7 +115,7 @@ export default function DocumentWizardPage() {
         // load doc type (schema-safe: select *)
         const { data: dtRaw, error: dtErr } = await supabase
           .from('document_types')
-          .select('*')
+          .select('id,name')
           .eq('id', params.docTypeId)
           .single()
         if (dtErr) throw dtErr
