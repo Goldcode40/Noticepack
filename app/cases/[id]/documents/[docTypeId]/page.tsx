@@ -4,185 +4,226 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { supabaseClient } from '@/lib/supabase/client'
+import { getWizardSchema, FieldSchema } from '@/lib/documents/wizardSchemas'
 
-type DraftRow = {
-  id: string
-  case_id: string
-  document_type_id: string
-  status: string
-  data: any
-  created_at: string
-  updated_at: string
-}
-
-type DocTypeRow = {
-  id: string
-  name: string
-}
+type CoverageStatus = 'implemented' | 'guided' | 'not_available'
 
 type CaseRow = {
   id: string
   title: string
   state_code: string
-  status: string
-  created_at: string
 }
 
-type CoverageStatus = 'implemented' | 'guided' | 'not_available' | 'unknown'
+type DocTypeRow = {
+  id: string
+  doc_name: string
+}
 
-function CoverageBadge({ status }: { status: CoverageStatus }) {
-  const map: Record<CoverageStatus, { label: string }> = {
-    implemented: { label: 'Implemented' },
-    guided: { label: 'Guided' },
-    not_available: { label: 'Not available' },
-    unknown: { label: 'Unknown' },
+type DraftRow = {
+  id: string
+  data: any
+  updated_at: string
+}
+
+function toInputValue(type: FieldSchema['type'], value: any): string {
+  if (value === null || value === undefined) return ''
+  if (type === 'date') {
+    // store ISO in DB, show YYYY-MM-DD in input
+    try {
+      const d = new Date(value)
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10)
+    } catch {}
   }
-  return <span className="inline-block rounded border px-2 py-1 text-xs">{map[status].label}</span>
+  return String(value)
+}
+
+function normalizeForSave(type: FieldSchema['type'], value: string): any {
+  if (type === 'number') {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : null
+  }
+  if (type === 'date') {
+    // store ISO date (midnight) for consistency
+    if (!value) return null
+    const d = new Date(value + 'T00:00:00.000Z')
+    return isNaN(d.getTime()) ? null : d.toISOString()
+  }
+  return value
 }
 
 export default function DocumentWizardPage() {
-  const params = useParams<{ id: string; docTypeId: string }>()
   const router = useRouter()
-  const supabase = useMemo(() => supabaseClient(), [])
-
-  const caseId = params?.id
-  const docTypeId = params?.docTypeId
+  const params = useParams() as { id?: string; docTypeId?: string }
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [savedMsg, setSavedMsg] = useState<string | null>(null)
 
-  const [userEmail, setUserEmail] = useState<string>('')
+  const [email, setEmail] = useState<string>('')
+  const [userId, setUserId] = useState<string>('')
+
   const [caseRow, setCaseRow] = useState<CaseRow | null>(null)
   const [docType, setDocType] = useState<DocTypeRow | null>(null)
-  const [coverage, setCoverage] = useState<CoverageStatus>('unknown')
+  const [coverage, setCoverage] = useState<CoverageStatus>('guided')
 
   const [draft, setDraft] = useState<DraftRow | null>(null)
-  const [savedMsg, setSavedMsg] = useState<string>('')
+  const [form, setForm] = useState<Record<string, string>>({})
 
-  // Wizard fields (v1)
-  const [landlordName, setLandlordName] = useState<string>('John Landlord')
-  const [tenantName, setTenantName] = useState<string>('Jane Tenant')
-  const [rentAmount, setRentAmount] = useState<string>('1200')
+  const schema = useMemo(() => getWizardSchema(docType?.doc_name), [docType?.doc_name])
 
   useEffect(() => {
-    let cancelled = false
+    let mounted = true
 
     async function run() {
-      try {
-        setLoading(true)
+      setLoading(true)
+      setError(null)
+      setSavedMsg(null)
 
-        // 1) Auth required
-        const { data: authData } = await supabase.auth.getUser()
-        const user = authData?.user
-        if (!user) {
-          const next = `/cases/${caseId}/documents/${docTypeId}`
-          router.replace(`/login?next=${encodeURIComponent(next)}`)
+      try {
+        if (!params?.id || !params?.docTypeId) {
+          throw new Error('Missing route params.')
+        }
+
+        const supabase = supabaseClient()
+
+        const { data: sessionData, error: sessErr } = await supabase.auth.getSession()
+        if (sessErr) throw sessErr
+        const session = sessionData.session
+        if (!session) {
+          router.replace('/login')
           return
         }
-        if (cancelled) return
-        setUserEmail(user.email ?? '')
 
-        // 2) Load case + doc type
-        const [caseRes, docRes] = await Promise.all([
-          supabase.from('cases').select('id,title,state_code,status,created_at').eq('id', caseId).single(),
-          supabase.from('document_types').select('id,name').eq('id', docTypeId).single(),
-        ])
+        const uid = session.user.id
+        const mail = session.user.email ?? ''
+        if (!mounted) return
 
-        if (caseRes.error) throw caseRes.error
-        if (docRes.error) throw docRes.error
+        setUserId(uid)
+        setEmail(mail)
 
-        if (cancelled) return
-        setCaseRow(caseRes.data as CaseRow)
-        setDocType(docRes.data as DocTypeRow)
+        // load case
+        const { data: c, error: cErr } = await supabase
+          .from('cases')
+          .select('id,title,state_code')
+          .eq('id', params.id)
+          .single()
+        if (cErr) throw cErr
+        if (!mounted) return
+        setCaseRow(c)
 
-        // 3) Coverage status for this state/doc
-        const covRes = await supabase
+        // load doc type
+        const { data: dt, error: dtErr } = await supabase
+          .from('document_types')
+          .select('id,doc_name')
+          .eq('id', params.docTypeId)
+          .single()
+        if (dtErr) throw dtErr
+        if (!mounted) return
+        setDocType(dt)
+
+        // coverage matrix (best-effort; default guided)
+        const { data: cov, error: covErr } = await supabase
           .from('coverage_matrix')
           .select('status')
-          .eq('state_code', caseRes.data.state_code)
-          .eq('document_type_id', docTypeId)
+          .eq('state_code', c.state_code)
+          .eq('document_type_id', dt.id)
           .maybeSingle()
-
-        if (!cancelled) {
-          const s = (covRes.data?.status ?? 'unknown') as CoverageStatus
-          setCoverage(s)
+        if (!covErr && cov?.status) {
+          setCoverage(cov.status as CoverageStatus)
+        } else {
+          setCoverage('guided')
         }
 
-        // 4) Load existing draft (prefill)
-        const draftRes = await supabase
+        // load draft (if exists)
+        const { data: d, error: dErr } = await supabase
           .from('case_documents')
-          .select('id,case_id,document_type_id,status,data,created_at,updated_at')
-          .eq('case_id', caseId)
-          .eq('document_type_id', docTypeId)
+          .select('id,data,updated_at')
+          .eq('case_id', c.id)
+          .eq('document_type_id', dt.id)
           .maybeSingle()
 
-        if (draftRes.error) throw draftRes.error
+        if (dErr) throw dErr
 
-        if (!cancelled && draftRes.data) {
-          const d = draftRes.data as DraftRow
+        if (!mounted) return
+        if (d) {
           setDraft(d)
-
-          const data = d.data || {}
-          if (typeof data.landlord_name === 'string') setLandlordName(data.landlord_name)
-          if (typeof data.tenant_name === 'string') setTenantName(data.tenant_name)
-          if (data.rent_amount !== undefined && data.rent_amount !== null) setRentAmount(String(data.rent_amount))
+          const nextForm: Record<string, string> = {}
+          for (const f of schema.fields) {
+            nextForm[f.key] = toInputValue(f.type, d.data?.[f.key])
+          }
+          setForm(nextForm)
+        } else {
+          // initialize empty form using schema
+          const nextForm: Record<string, string> = {}
+          for (const f of schema.fields) nextForm[f.key] = ''
+          setForm(nextForm)
+          setDraft(null)
         }
 
-        if (!cancelled) setLoading(false)
+        setLoading(false)
       } catch (e: any) {
-        if (!cancelled) {
-          setLoading(false)
-          setSavedMsg(`Error: ${e?.message ?? 'Unknown error'}`)
-        }
+        if (!mounted) return
+        setError(e?.message ?? 'Unknown error')
+        setLoading(false)
       }
     }
 
     run()
     return () => {
-      cancelled = true
+      mounted = false
     }
-  }, [supabase, router, caseId, docTypeId])
+    // NOTE: schema.fields changes after docType loads; we re-init form above accordingly
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params?.id, params?.docTypeId, router, docType?.doc_name])
+
+  function onChange(key: string, value: string) {
+    setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const missingRequired = useMemo(() => {
+    const missing: string[] = []
+    for (const f of schema.fields) {
+      if (f.required && !String(form[f.key] ?? '').trim()) missing.push(f.key)
+    }
+    return missing
+  }, [form, schema.fields])
 
   async function saveDraft() {
+    setSaving(true)
+    setError(null)
+    setSavedMsg(null)
+
     try {
-      setSaving(true)
-      setSavedMsg('')
+      if (!caseRow || !docType || !userId) throw new Error('Missing context.')
+      const supabase = supabaseClient()
 
-      const { data: authData } = await supabase.auth.getUser()
-      const user = authData?.user
-      if (!user) {
-        const next = `/cases/${caseId}/documents/${docTypeId}`
-        router.replace(`/login?next=${encodeURIComponent(next)}`)
-        return
+      const payload: Record<string, any> = {}
+      for (const f of schema.fields) {
+        payload[f.key] = normalizeForSave(f.type, String(form[f.key] ?? ''))
       }
 
-      const payload = {
-        landlord_name: landlordName.trim(),
-        tenant_name: tenantName.trim(),
-        rent_amount: rentAmount.trim(),
-      }
-
-      const upsertRes = await supabase
+      const { data, error: upErr } = await supabase
         .from('case_documents')
         .upsert(
           {
-            user_id: user.id,
-            case_id: caseId,
-            document_type_id: docTypeId,
+            user_id: userId,
+            case_id: caseRow.id,
+            document_type_id: docType.id,
             status: 'draft',
             data: payload,
           },
           { onConflict: 'case_id,document_type_id' }
         )
-        .select('id,case_id,document_type_id,status,data,created_at,updated_at')
+        .select('id,data,updated_at')
         .single()
 
-      if (upsertRes.error) throw upsertRes.error
+      if (upErr) throw upErr
 
-      setDraft(upsertRes.data as DraftRow)
+      setDraft(data)
       setSavedMsg('Saved.')
     } catch (e: any) {
-      setSavedMsg(`Error: ${e?.message ?? 'Unknown error'}`)
+      setError(e?.message ?? 'Save failed.')
     } finally {
       setSaving(false)
     }
@@ -191,74 +232,104 @@ export default function DocumentWizardPage() {
   if (loading) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Document Wizard</h1>
-        <Link
-          className="rounded border px-3 py-2 text-sm"
-          href={`/cases/${caseId}`}
-        >
+        <h1 className="text-2xl font-semibold">Document Wizard</h1>
+        <button className="rounded border px-3 py-2 text-sm" onClick={() => router.back()}>
           Back
-        </Link>
+        </button>
       </div>
 
-      {savedMsg ? <div className="text-sm">{savedMsg}</div> : null}
+      {savedMsg && <div className="mt-2 text-sm">{savedMsg}</div>}
 
-      <div className="rounded border p-4 space-y-2">
-        <div><b>User:</b> {userEmail}</div>
-        <div><b>Document:</b> {docType?.name ?? docTypeId}</div>
-        <div className="flex items-center gap-2">
-          <b>Coverage:</b> <CoverageBadge status={coverage} />
+      {error && (
+        <div className="mt-4 rounded border p-3 text-sm">
+          <div className="font-semibold">Error</div>
+          <div>{error}</div>
+        </div>
+      )}
+
+      <div className="mt-6 rounded border p-4">
+        <div className="font-semibold">User: <span className="font-normal">{email}</span></div>
+        <div className="mt-2 font-semibold">
+          Document: <span className="font-normal">{docType?.doc_name ?? '(unknown)'}</span>
+        </div>
+        <div className="mt-2 font-semibold">
+          Coverage:{' '}
+          <span className="inline-block rounded border px-2 py-1 text-xs font-normal">
+            {coverage === 'implemented' ? 'Implemented' : coverage === 'guided' ? 'Guided' : 'Not available'}
+          </span>
         </div>
 
-        <div className="text-sm text-gray-600 space-y-1">
-          <div><b>Draft ID:</b> {draft?.id ?? 'None yet'}</div>
-          <div><b>Last saved:</b> {draft?.updated_at ? new Date(draft.updated_at).toLocaleString() : '—'}</div>
+        <div className="mt-2 text-sm text-gray-600">
+          {draft ? (
+            <>
+              Draft ID: <span className="text-gray-900">{draft.id}</span>
+              <br />
+              Last saved: <span className="text-gray-900">{new Date(draft.updated_at).toLocaleString()}</span>
+            </>
+          ) : (
+            <>No draft yet.</>
+          )}
         </div>
 
-        <div className="text-sm text-gray-600">
+        <div className="mt-3 text-sm text-gray-600">
           Wizard UI comes next (guided questions + PDF generation). For now this confirms routing + auth + draft persistence.
         </div>
       </div>
 
-      <div className="rounded border p-4 space-y-4">
-        <h2 className="font-semibold">Wizard Fields (v1)</h2>
+      <div className="mt-6 rounded border p-4">
+        <div className="font-semibold">{schema.title} — Fields (v1)</div>
 
-        <div className="space-y-2">
-          <label className="block text-sm">Landlord name</label>
-          <input
-            className="w-full rounded border p-2"
-            value={landlordName}
-            onChange={(e) => setLandlordName(e.target.value)}
-          />
+        {missingRequired.length > 0 && (
+          <div className="mt-2 text-sm text-red-600">
+            Missing required: {missingRequired.join(', ')}
+          </div>
+        )}
+
+        <div className="mt-4 space-y-4">
+          {schema.fields.map((f) => (
+            <div key={f.key}>
+              <div className="text-sm font-medium">
+                {f.label} {f.required ? <span className="text-red-600">*</span> : null}
+              </div>
+
+              {f.type === 'textarea' ? (
+                <textarea
+                  className="mt-1 w-full rounded border px-3 py-2"
+                  rows={3}
+                  placeholder={f.placeholder ?? ''}
+                  value={form[f.key] ?? ''}
+                  onChange={(e) => onChange(f.key, e.target.value)}
+                />
+              ) : (
+                <input
+                  className="mt-1 w-full rounded border px-3 py-2"
+                  type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}
+                  placeholder={f.placeholder ?? ''}
+                  value={form[f.key] ?? ''}
+                  onChange={(e) => onChange(f.key, e.target.value)}
+                />
+              )}
+
+              {f.help ? <div className="mt-1 text-xs text-gray-500">{f.help}</div> : null}
+            </div>
+          ))}
         </div>
 
-        <div className="space-y-2">
-          <label className="block text-sm">Tenant name</label>
-          <input
-            className="w-full rounded border p-2"
-            value={tenantName}
-            onChange={(e) => setTenantName(e.target.value)}
-          />
-        </div>
+        <div className="mt-5">
+          <button
+            className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+            onClick={saveDraft}
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : 'Save Draft'}
+          </button>
 
-        <div className="space-y-2">
-          <label className="block text-sm">Rent amount</label>
-          <input
-            className="w-full rounded border p-2"
-            inputMode="numeric"
-            value={rentAmount}
-            onChange={(e) => setRentAmount(e.target.value)}
-          />
+          <Link className="ml-3 text-sm underline" href={`/cases/${params.id}`}>
+            Back to case
+          </Link>
         </div>
-
-        <button
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-60"
-          onClick={saveDraft}
-          disabled={saving}
-        >
-          {saving ? 'Saving…' : 'Save Draft'}
-        </button>
       </div>
     </div>
   )
