@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
 import { supabaseClient } from '@/lib/supabase/client'
 
@@ -13,13 +13,17 @@ type CaseRow = {
   created_at: string
 }
 
-export default function CasesPage() {
+export default function CaseDetailPage() {
   const router = useRouter()
+  const params = useParams()
   const supabase = useMemo(() => supabaseClient(), [])
+
+  const rawId = (params as any)?.id
+  const id = Array.isArray(rawId) ? rawId[0] : rawId
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [rows, setRows] = useState<CaseRow[]>([])
+  const [row, setRow] = useState<CaseRow | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -28,6 +32,12 @@ export default function CasesPage() {
       try {
         setLoading(true)
         setError(null)
+
+        if (!id || typeof id !== 'string') {
+          setError('Missing case id in URL')
+          setLoading(false)
+          return
+        }
 
         const { data: sessionData, error: sessionErr } = await supabase.auth.getSession()
         if (sessionErr) throw sessionErr
@@ -39,12 +49,13 @@ export default function CasesPage() {
         const { data, error } = await supabase
           .from('cases')
           .select('id,title,state_code,status,created_at')
-          .order('created_at', { ascending: false })
+          .eq('id', id)
+          .single()
 
         if (error) throw error
         if (!alive) return
 
-        setRows((data ?? []) as CaseRow[])
+        setRow(data as CaseRow)
         setLoading(false)
       } catch (err: any) {
         if (!alive) return
@@ -58,7 +69,7 @@ export default function CasesPage() {
     return () => {
       alive = false
     }
-  }, [router, supabase])
+  }, [id, router, supabase])
 
   if (loading) {
     return (
@@ -71,37 +82,22 @@ export default function CasesPage() {
   return (
     <div className="min-h-screen p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Cases</h1>
-        <div className="flex gap-2">
-          <Link className="rounded border px-3 py-2" href="/cases/new">
-            New Case
-          </Link>
-          <Link className="rounded border px-3 py-2" href="/dashboard">
-            Back
-          </Link>
-        </div>
+        <h1 className="text-2xl font-semibold">Case</h1>
+        <Link className="rounded border px-3 py-2" href="/cases">
+          Back
+        </Link>
       </div>
 
       {error && <div className="rounded border p-3">Error: {error}</div>}
 
-      <div className="rounded border p-4">
-        {rows.length === 0 ? (
-          <p>No cases yet.</p>
-        ) : (
-          <ul className="space-y-2">
-            {rows.map((c) => (
-              <li key={c.id}>
-                <Link href={`/cases/${c.id}`} className="block rounded border p-3 hover:bg-gray-50">
-                  <div className="font-semibold">{c.title}</div>
-                  <div className="text-sm text-gray-600">
-                    {c.state_code} · {c.status} · {new Date(c.created_at).toLocaleString()}
-                  </div>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {row && (
+        <div className="rounded border p-4 space-y-2">
+          <div><strong>Title:</strong> {row.title}</div>
+          <div><strong>State:</strong> {row.state_code}</div>
+          <div><strong>Status:</strong> {row.status}</div>
+          <div><strong>Created:</strong> {new Date(row.created_at).toLocaleString()}</div>
+        </div>
+      )}
     </div>
   )
 }
