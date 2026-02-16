@@ -16,7 +16,7 @@ type CaseRow = {
 
 type DocTypeRow = {
   id: string
-  doc_name: string
+  name: string // we normalize into this field even if DB uses a different column name
 }
 
 type DraftRow = {
@@ -25,10 +25,13 @@ type DraftRow = {
   updated_at: string
 }
 
+function pickDocName(row: any): string {
+  return String(row?.name ?? row?.name ?? row?.title ?? '').trim()
+}
+
 function toInputValue(type: FieldSchema['type'], value: any): string {
   if (value === null || value === undefined) return ''
   if (type === 'date') {
-    // store ISO in DB, show YYYY-MM-DD in input
     try {
       const d = new Date(value)
       if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10)
@@ -43,7 +46,6 @@ function normalizeForSave(type: FieldSchema['type'], value: string): any {
     return Number.isFinite(n) ? n : null
   }
   if (type === 'date') {
-    // store ISO date (midnight) for consistency
     if (!value) return null
     const d = new Date(value + 'T00:00:00.000Z')
     return isNaN(d.getTime()) ? null : d.toISOString()
@@ -70,7 +72,7 @@ export default function DocumentWizardPage() {
   const [draft, setDraft] = useState<DraftRow | null>(null)
   const [form, setForm] = useState<Record<string, string>>({})
 
-  const schema = useMemo(() => getWizardSchema(docType?.doc_name), [docType?.doc_name])
+  const schema = useMemo(() => getWizardSchema(docType?.name), [docType?.name])
 
   useEffect(() => {
     let mounted = true
@@ -81,9 +83,7 @@ export default function DocumentWizardPage() {
       setSavedMsg(null)
 
       try {
-        if (!params?.id || !params?.docTypeId) {
-          throw new Error('Missing route params.')
-        }
+        if (!params?.id || !params?.docTypeId) throw new Error('Missing route params.')
 
         const supabase = supabaseClient()
 
@@ -97,8 +97,8 @@ export default function DocumentWizardPage() {
 
         const uid = session.user.id
         const mail = session.user.email ?? ''
-        if (!mounted) return
 
+        if (!mounted) return
         setUserId(uid)
         setEmail(mail)
 
@@ -112,49 +112,50 @@ export default function DocumentWizardPage() {
         if (!mounted) return
         setCaseRow(c)
 
-        // load doc type
-        const { data: dt, error: dtErr } = await supabase
+        // load doc type (schema-safe: select *)
+        const { data: dtRaw, error: dtErr } = await supabase
           .from('document_types')
-          .select('id,doc_name')
+          .select('*')
           .eq('id', params.docTypeId)
           .single()
         if (dtErr) throw dtErr
+
+        const normalizedDocType: DocTypeRow = {
+          id: dtRaw.id,
+          name: pickDocName(dtRaw) || '(unknown)',
+        }
+
         if (!mounted) return
-        setDocType(dt)
+        setDocType(normalizedDocType)
 
         // coverage matrix (best-effort; default guided)
         const { data: cov, error: covErr } = await supabase
           .from('coverage_matrix')
           .select('status')
           .eq('state_code', c.state_code)
-          .eq('document_type_id', dt.id)
+          .eq('document_type_id', normalizedDocType.id)
           .maybeSingle()
-        if (!covErr && cov?.status) {
-          setCoverage(cov.status as CoverageStatus)
-        } else {
-          setCoverage('guided')
-        }
+
+        if (!covErr && cov?.status) setCoverage(cov.status as CoverageStatus)
+        else setCoverage('guided')
 
         // load draft (if exists)
         const { data: d, error: dErr } = await supabase
           .from('case_documents')
           .select('id,data,updated_at')
           .eq('case_id', c.id)
-          .eq('document_type_id', dt.id)
+          .eq('document_type_id', normalizedDocType.id)
           .maybeSingle()
 
         if (dErr) throw dErr
-
         if (!mounted) return
+
         if (d) {
           setDraft(d)
           const nextForm: Record<string, string> = {}
-          for (const f of schema.fields) {
-            nextForm[f.key] = toInputValue(f.type, d.data?.[f.key])
-          }
+          for (const f of schema.fields) nextForm[f.key] = toInputValue(f.type, d.data?.[f.key])
           setForm(nextForm)
         } else {
-          // initialize empty form using schema
           const nextForm: Record<string, string> = {}
           for (const f of schema.fields) nextForm[f.key] = ''
           setForm(nextForm)
@@ -173,9 +174,8 @@ export default function DocumentWizardPage() {
     return () => {
       mounted = false
     }
-    // NOTE: schema.fields changes after docType loads; we re-init form above accordingly
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params?.id, params?.docTypeId, router, docType?.doc_name])
+  }, [params?.id, params?.docTypeId, router, docType?.name])
 
   function onChange(key: string, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }))
@@ -250,9 +250,11 @@ export default function DocumentWizardPage() {
       )}
 
       <div className="mt-6 rounded border p-4">
-        <div className="font-semibold">User: <span className="font-normal">{email}</span></div>
+        <div className="font-semibold">
+          User: <span className="font-normal">{email}</span>
+        </div>
         <div className="mt-2 font-semibold">
-          Document: <span className="font-normal">{docType?.doc_name ?? '(unknown)'}</span>
+          Document: <span className="font-normal">{docType?.name ?? '(unknown)'}</span>
         </div>
         <div className="mt-2 font-semibold">
           Coverage:{' '}
@@ -282,9 +284,7 @@ export default function DocumentWizardPage() {
         <div className="font-semibold">{schema.title} — Fields (v1)</div>
 
         {missingRequired.length > 0 && (
-          <div className="mt-2 text-sm text-red-600">
-            Missing required: {missingRequired.join(', ')}
-          </div>
+          <div className="mt-2 text-sm text-red-600">Missing required: {missingRequired.join(', ')}</div>
         )}
 
         <div className="mt-4 space-y-4">
@@ -318,11 +318,7 @@ export default function DocumentWizardPage() {
         </div>
 
         <div className="mt-5">
-          <button
-            className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
-            onClick={saveDraft}
-            disabled={saving}
-          >
+          <button className="rounded bg-black px-4 py-2 text-white disabled:opacity-50" onClick={saveDraft} disabled={saving}>
             {saving ? 'Saving...' : 'Save Draft'}
           </button>
 
