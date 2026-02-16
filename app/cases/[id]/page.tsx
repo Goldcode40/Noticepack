@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
+import { useParams, useRouter } from 'next/navigation'
 import { supabaseClient } from '@/lib/supabase/client'
 
 type CaseRow = {
@@ -13,206 +13,221 @@ type CaseRow = {
   created_at: string
 }
 
+type CoverageStatus = 'implemented' | 'guided' | 'not_available'
+
 type DocRow = {
   document_type_id: string
   doc_name: string
-  status: 'implemented' | 'guided' | 'not_available'
+  status: CoverageStatus
 }
 
-function Badge({ status }: { status: DocRow['status'] }) {
-  const map: Record<DocRow['status'], { label: string }> = {
-    implemented: { label: '✅ Implemented' },
-    guided: { label: '🟡 Guided' },
-    not_available: { label: '🔴 Not available' },
+type DraftRow = {
+  document_type_id: string
+  status: string
+  updated_at: string
+}
+
+function CoverageBadge({ status }: { status: CoverageStatus }) {
+  const map: Record<CoverageStatus, { label: string }> = {
+    implemented: { label: 'Implemented' },
+    guided: { label: 'Guided' },
+    not_available: { label: 'Not available' },
   }
+
   return (
-    <span className="inline-block rounded border px-2 py-1 text-xs">
+    <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
       {map[status].label}
     </span>
   )
 }
 
-export default function CaseDetailPage() {
-  const router = useRouter()
-  const params = useParams()
-  const supabase = useMemo(() => supabaseClient(), [])
+function DraftBadge() {
+  return (
+    <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
+      Draft
+    </span>
+  )
+}
 
-  const rawId = (params as any)?.id
-  const id = Array.isArray(rawId) ? rawId[0] : rawId
+export default function CasePage() {
+  const params = useParams<{ id: string }>()
+  const router = useRouter()
 
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [row, setRow] = useState<CaseRow | null>(null)
-
-  const [docsLoading, setDocsLoading] = useState(false)
-  const [docsError, setDocsError] = useState<string | null>(null)
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [caseRow, setCaseRow] = useState<CaseRow | null>(null)
   const [docs, setDocs] = useState<DocRow[]>([])
+  const [drafts, setDrafts] = useState<DraftRow[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  const caseId = params?.id
+
+  const draftMap = useMemo(() => {
+    const m = new Map<string, DraftRow>()
+    for (const d of drafts) m.set(d.document_type_id, d)
+    return m
+  }, [drafts])
 
   useEffect(() => {
-    let alive = true
+    let cancelled = false
 
-    const run = async () => {
+    async function run() {
       try {
         setLoading(true)
         setError(null)
 
-        if (!id || typeof id !== 'string') {
-          setError('Missing case id in URL')
-          setLoading(false)
-          return
-        }
+        const supabase = supabaseClient()
 
-        const { data: sessionData, error: sessionErr } = await supabase.auth.getSession()
-        if (sessionErr) throw sessionErr
-        if (!sessionData.session) {
+        // 1) Auth gate
+        const { data: userRes, error: userErr } = await supabase.auth.getUser()
+        if (userErr) throw userErr
+        if (!userRes?.user) {
           router.replace('/login')
           return
         }
+        if (!cancelled) setUserEmail(userRes.user.email ?? null)
 
-        const { data, error } = await supabase
+        if (!caseId) throw new Error('Missing case id in route.')
+
+        // 2) Load case
+        const { data: c, error: cErr } = await supabase
           .from('cases')
           .select('id,title,state_code,status,created_at')
-          .eq('id', id)
+          .eq('id', caseId)
           .single()
 
-        if (error) throw error
-        if (!alive) return
+        if (cErr) throw cErr
+        if (!cancelled) setCaseRow(c as CaseRow)
 
-        setRow(data as CaseRow)
-        setLoading(false)
-      } catch (err: any) {
-        if (!alive) return
-        setError(err?.message ?? 'Unknown error')
-        setLoading(false)
+        const stateCode = (c as CaseRow).state_code
+
+        // 3) Load coverage rows for this state
+        const { data: coverage, error: covErr } = await supabase
+          .from('coverage_matrix')
+          .select('document_type_id,status,document_types(name)')
+          .eq('state_code', stateCode)
+          .order('document_types(name)', { ascending: true })
+
+        if (covErr) throw covErr
+
+        const docRows: DocRow[] = (coverage ?? []).map((r: any) => ({
+          document_type_id: r.document_type_id,
+          doc_name: r.document_types?.name ?? 'Unknown document',
+          status: (r.status as CoverageStatus) ?? 'not_available',
+        }))
+
+        if (!cancelled) setDocs(docRows)
+
+        // 4) Load drafts for this case
+        const { data: d, error: dErr } = await supabase
+          .from('case_documents')
+          .select('document_type_id,status,updated_at')
+          .eq('case_id', caseId)
+
+        if (dErr) throw dErr
+        if (!cancelled) setDrafts((d ?? []) as DraftRow[])
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? 'Unknown error')
+      } finally {
+        if (!cancelled) setLoading(false)
       }
     }
 
     run()
-
     return () => {
-      alive = false
+      cancelled = true
     }
-  }, [id, router, supabase])
+  }, [caseId, router])
 
-  // load coverage list once we know the case state_code
-  useEffect(() => {
-    let alive = true
-
-    const runDocs = async () => {
-      if (!row?.state_code) return
-      try {
-        setDocsLoading(true)
-        setDocsError(null)
-
-        const stateCode = row.state_code.toUpperCase()
-
-        // NOTE: your seed uses coverage_matrix with state_code + document_type_id + status.
-        // We join document_types in a second query for compatibility (no SQL view needed yet).
-        const { data: coverage, error: covErr } = await supabase
-          .from('coverage_matrix')
-          .select('document_type_id,status')
-          .eq('state_code', stateCode)
-          .order('document_type_id', { ascending: true })
-
-        if (covErr) throw covErr
-
-        const docTypeIds = (coverage ?? []).map((c: any) => c.document_type_id).filter(Boolean)
-        if (docTypeIds.length === 0) {
-          if (!alive) return
-          setDocs([])
-          setDocsLoading(false)
-          return
-        }
-
-        const { data: docTypes, error: dtErr } = await supabase
-          .from('document_types')
-          .select('id,name')
-          .in('id', docTypeIds)
-
-        if (dtErr) throw dtErr
-
-        const nameMap = new Map<string, string>()
-        ;(docTypes ?? []).forEach((d: any) => nameMap.set(d.id, d.name))
-
-        const merged: DocRow[] = (coverage ?? []).map((c: any) => ({
-          document_type_id: c.document_type_id,
-          doc_name: nameMap.get(c.document_type_id) ?? 'Unknown document',
-          status: c.status,
-        }))
-
-        // sort by doc name for nicer UI
-        merged.sort((a, b) => a.doc_name.localeCompare(b.doc_name))
-
-        if (!alive) return
-        setDocs(merged)
-        setDocsLoading(false)
-      } catch (err: any) {
-        if (!alive) return
-        setDocsError(err?.message ?? 'Unknown error')
-        setDocsLoading(false)
-      }
-    }
-
-    runDocs()
-
-    return () => {
-      alive = false
-    }
-  }, [row?.state_code, supabase])
-
-  if (loading) {
-    return (
-      <div className="min-h-screen p-6">
-        <p>Loading…</p>
-      </div>
-    )
-  }
+  if (loading) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="min-h-screen p-6 space-y-4">
+    <div className="p-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Case</h1>
-        <Link className="rounded border px-3 py-2" href="/cases">
+        <h1 className="text-3xl font-bold">Case</h1>
+        <button
+          className="rounded border px-4 py-2"
+          onClick={() => router.push('/cases')}
+          type="button"
+        >
           Back
-        </Link>
+        </button>
       </div>
 
-      {error && <div className="rounded border p-3">Error: {error}</div>}
+      {error ? (
+        <div className="mt-6 rounded border p-4">Error: {error}</div>
+      ) : null}
 
-      {row && (
-        <div className="rounded border p-4 space-y-2">
-          <div><strong>Title:</strong> {row.title}</div>
-          <div><strong>State:</strong> {row.state_code}</div>
-          <div><strong>Status:</strong> {row.status}</div>
-          <div><strong>Created:</strong> {new Date(row.created_at).toLocaleString()}</div>
+      {caseRow ? (
+        <div className="mt-6 rounded border p-4">
+          <div className="font-semibold">
+            Title: <span className="font-normal">{caseRow.title}</span>
+          </div>
+          <div className="mt-2 font-semibold">
+            State: <span className="font-normal">{caseRow.state_code}</span>
+          </div>
+          <div className="mt-2 font-semibold">
+            Status: <span className="font-normal">{caseRow.status}</span>
+          </div>
+          <div className="mt-2 font-semibold">
+            Created:{' '}
+            <span className="font-normal">
+              {new Date(caseRow.created_at).toLocaleString()}
+            </span>
+          </div>
         </div>
-      )}
+      ) : null}
 
-      <div className="rounded border p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Documents</h2>
-          <div className="text-sm text-gray-600">
-            Availability for <strong>{row?.state_code}</strong>
+      <div className="mt-6 rounded border">
+        <div className="flex items-center justify-between border-b p-4">
+          <h2 className="text-xl font-bold">Documents</h2>
+          <div className="text-sm text-gray-500">
+            Availability for <span className="font-semibold">{caseRow?.state_code}</span>
           </div>
         </div>
 
-        {docsLoading && <div>Loading document library…</div>}
-        {docsError && <div className="rounded border p-3">Error: {docsError}</div>}
+        <div className="p-4 space-y-3">
+          {docs.map((d) => {
+            const draft = draftMap.get(d.document_type_id)
+            const href = `/cases/${caseId}/documents/${d.document_type_id}`
+            const cta = draft ? 'Continue' : 'Start'
 
-        {!docsLoading && !docsError && docs.length === 0 && (
-          <div>No coverage rows found for this state.</div>
-        )}
+            return (
+              <Link
+                key={d.document_type_id}
+                href={href}
+                className="block rounded border p-3 hover:bg-gray-50"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium">{d.doc_name}</div>
+                  <div className="flex items-center gap-2">
+                    {draft ? <DraftBadge /> : null}
+                    <CoverageBadge status={d.status} />
+                    <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
+                      {cta}
+                    </span>
+                  </div>
+                </div>
 
-        {!docsLoading && !docsError && docs.length > 0 && (
-          <ul className="space-y-2">
-            {docs.map((d) => (
-              <li key={d.document_type_id} className="flex items-center justify-between rounded border p-3">
-                <div className="font-medium">{d.doc_name}</div>
-                <Badge status={d.status} />
-              </li>
-            ))}
-          </ul>
-        )}
+                {draft ? (
+                  <div className="mt-2 text-xs text-gray-600">
+                    Last saved: {new Date(draft.updated_at).toLocaleString()}
+                  </div>
+                ) : (
+                  <div className="mt-2 text-xs text-gray-600">No draft yet.</div>
+                )}
+              </Link>
+            )
+          })}
+
+          {docs.length === 0 ? (
+            <div className="text-sm text-gray-600">No documents found for this state.</div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-6 text-sm text-gray-600">
+        Signed in as: <span className="font-semibold">{userEmail ?? 'Unknown'}</span>
       </div>
     </div>
   )
