@@ -2,45 +2,36 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 
-async function makeSimplePdf(text: string): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.create()
-  const page = pdfDoc.addPage([612, 792]) // US Letter
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+type Ctx = { params: Promise<{ caseId: string; docTypeId: string }> }
 
-  const fontSize = 12
-  const margin = 50
-  const maxWidth = 612 - margin * 2
-
-  // naive wrap
-  const words = text.split(/\s+/)
-  let line = ''
-  const lines: string[] = []
-  for (const w of words) {
-    const test = line ? `${line} ${w}` : w
-    const width = font.widthOfTextAtSize(test, fontSize)
-    if (width > maxWidth) {
-      if (line) lines.push(line)
-      line = w
-    } else {
-      line = test
-    }
-  }
-  if (line) lines.push(line)
-
-  let y = 792 - margin
-  for (const ln of lines) {
-    page.drawText(ln, { x: margin, y, size: fontSize, font })
-    y -= fontSize + 4
-    if (y < margin) break
-  }
-
-  return await pdfDoc.save()
+function getBearer(req: NextRequest): string | null {
+  const h = req.headers.get('authorization') || req.headers.get('Authorization')
+  if (!h) return null
+  const m = /^Bearer\s+(.+)$/i.exec(h.trim())
+  return m ? m[1] : null
 }
 
-export async function GET(
-  req: NextRequest,
-  ctx: { params: Promise<{ caseId: string; docTypeId: string }> }
-) {
+// Simple word-wrap for PDF lines (monospace-ish approximation)
+function wrapLine(line: string, maxChars: number): string[] {
+  const s = String(line ?? '')
+  if (s.length <= maxChars) return [s]
+
+  const out: string[] = []
+  let rest = s
+
+  while (rest.length > maxChars) {
+    // Try to break on last space within maxChars
+    let cut = rest.lastIndexOf(' ', maxChars)
+    if (cut < 20) cut = maxChars // if no good space, hard cut
+    out.push(rest.slice(0, cut).trimEnd())
+    rest = rest.slice(cut).trimStart()
+  }
+
+  if (rest.length) out.push(rest)
+  return out
+}
+
+export async function GET(req: NextRequest, ctx: Ctx) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
@@ -53,25 +44,22 @@ export async function GET(
 
   const { caseId, docTypeId } = await ctx.params
 
-  // Auth: expect Supabase access token
-  const auth = req.headers.get('authorization') ?? ''
-  const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : null
-  if (!token) {
-    return NextResponse.json({ ok: false, error: 'Missing bearer token' }, { status: 401 })
-  }
-
-  // Use token to fetch user (ensures the caller is authenticated)
   const supabase = createClient(url, anon, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
+    global: {
+      headers: (() => {
+        const token = getBearer(req)
+        return token ? { Authorization: `Bearer ${token}` } : {}
+      })(),
+    },
   })
 
-  const { data: userRes, error: userErr } = await supabase.auth.getUser()
-  if (userErr || !userRes?.user) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 })
+  // Require auth token (keeps endpoint protected)
+  const token = getBearer(req)
+  if (!token) {
+    return NextResponse.json({ ok: false, error: 'Missing Bearer token' }, { status: 401 })
   }
 
-  // Optional: verify the case_document exists for this user (keeps it tight)
+  // Fetch the draft + doc name (best-effort, shape depends on your Supabase relationship)
   const { data: cd, error: cdErr } = await supabase
     .from('case_documents')
     .select('id,status,generated_at,data,document_types(name)')
@@ -83,17 +71,10 @@ export async function GET(
     return NextResponse.json({ ok: false, error: cdErr.message }, { status: 404 })
   }
 
-    const docName = (cd as any)?.document_types?.name ?? 'Unknown document'
+  const docName = (cd as any)?.document_types?.name ?? 'Unknown document'
   const draft = ((cd as any)?.data ?? {}) as Record<string, any>
 
-  
-
-const safe = (k: string): string => {
-  const v = (draft as any)?.[k]
-  if (v === null || v === undefined) return ''
-  return String(v)
-}
-const pick = (k: string) => {
+  const safe = (k: string) => {
     const v = draft?.[k]
     if (v === null || v === undefined) return ''
     return String(v)
@@ -109,7 +90,6 @@ const pick = (k: string) => {
   lines.push('generated_at: ' + String((cd as any)?.generated_at ?? 'n/a'))
   lines.push('')
 
-  // If this is Notice of Non-Renewal, show a few known fields (best-effort)
   if (docName.toLowerCase().includes('non-renewal')) {
     lines.push('--- Notice of Non-Renewal Fields (from draft) ---')
     lines.push('tenant_name: ' + safe('tenant_name'))
@@ -121,16 +101,44 @@ const pick = (k: string) => {
     lines.push('landlord_email: ' + safe('landlord_email'))
     lines.push('')
   } else {
-    lines.push('--- Draft Keys Present ---')
+    lines.push('--- Draft Keys Present (first 25) ---')
     const keys = Object.keys(draft || {}).slice(0, 25)
     lines.push(keys.length ? keys.join(', ') : '(no draft fields)')
     lines.push('')
   }
 
   lines.push('Next step: real template formatting + layout.')
-  const text = lines.join('\n')
 
-  const pdfBytes = await makeSimplePdf(text)
+  // Build PDF
+  const pdfDoc = await PDFDocument.create()
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  let page = pdfDoc.addPage([612, 792]) // Letter
+  const fontSize = 11
+  const left = 50
+  const top = 750
+  const lineHeight = 16
+  const maxChars = 110
+
+  let y = top
+
+  // Flatten lines + wrapped lines
+  const finalRows: string[] = []
+  for (const line of lines) {
+    const wrapped = wrapLine(line, maxChars)
+    for (const w of wrapped) finalRows.push(w)
+  }
+
+  for (const row of finalRows) {
+    if (y < 60) {
+      page = pdfDoc.addPage([612, 792])
+      y = top
+    }
+    const safeRow = row.length > 0 ? row : ' '
+    page.drawText(safeRow, { x: left, y, size: fontSize, font })
+    y -= lineHeight
+  }
+
+  const pdfBytes = await pdfDoc.save()
 
   return new NextResponse(pdfBytes, {
     status: 200,
@@ -140,9 +148,3 @@ const pick = (k: string) => {
     },
   })
 }
-
-
-
-
-
-
