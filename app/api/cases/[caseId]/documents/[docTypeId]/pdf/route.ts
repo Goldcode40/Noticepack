@@ -86,7 +86,14 @@ export async function GET(
     const docName = (cd as any)?.document_types?.name ?? 'Unknown document'
   const draft = ((cd as any)?.data ?? {}) as Record<string, any>
 
-  const pick = (k: string) => {
+  
+
+const safe = (k: string): string => {
+  const v = (draft as any)?.[k]
+  if (v === null || v === undefined) return ''
+  return String(v)
+}
+const pick = (k: string) => {
     const v = draft?.[k]
     if (v === null || v === undefined) return ''
     return String(v)
@@ -123,7 +130,9 @@ export async function GET(
   lines.push('Next step: real template formatting + layout.')
   const text = lines.join('\n')
 
-  const pdfBytes = await makeSimplePdf(text)  return new NextResponse(pdfBytes, {
+  const pdfBytes = await makeSimplePdf(text)
+
+  return new NextResponse(pdfBytes, {
     status: 200,
     headers: {
       'content-type': 'application/pdf',
@@ -131,6 +140,8 @@ export async function GET(
     },
   })
 }
+
+
 
 
 
