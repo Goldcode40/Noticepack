@@ -1,127 +1,103 @@
-import { NextRequest, NextResponse } from "next/server"
-import { createClient } from "@supabase/supabase-js"
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
+import { PDFDocument, StandardFonts } from 'pdf-lib'
 
-// Minimal PDF generator (no deps): builds a 1-page PDF with a single line of text.
-function makeSimplePdf(text: string): Uint8Array {
-  // Basic PDF objects
-  const lines = [
-    "%PDF-1.4\n",
-  ]
+async function makeSimplePdf(text: string): Promise<Uint8Array> {
+  const pdfDoc = await PDFDocument.create()
+  const page = pdfDoc.addPage([612, 792]) // US Letter
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
 
-  const objects: string[] = []
+  const fontSize = 12
+  const margin = 50
+  const maxWidth = 612 - margin * 2
 
-  // Helper: escape parentheses in PDF strings
-  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
+  // naive wrap
+  const words = text.split(/\s+/)
+  let line = ''
+  const lines: string[] = []
+  for (const w of words) {
+    const test = line ? `${line} ${w}` : w
+    const width = font.widthOfTextAtSize(test, fontSize)
+    if (width > maxWidth) {
+      if (line) lines.push(line)
+      line = w
+    } else {
+      line = test
+    }
+  }
+  if (line) lines.push(line)
 
-  // 1: Catalog
-  objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
-  // 2: Pages
-  objects.push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-  // 3: Page
-  objects.push(
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R " +
-      "/Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"
-  )
-  // 4: Contents
-  const content = `BT /F1 12 Tf 50 740 Td (${esc(text)}) Tj ET\n`
-  objects.push(`4 0 obj\n<< /Length ${content.length} >>\nstream\n${content}endstream\nendobj\n`)
-  // 5: Font
-  objects.push("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
-
-  // Build xref
-  // Track byte offsets
-  let offset = 0
-  const chunks: string[] = []
-  const offsets: number[] = [0] // object 0 is special
-
-  for (const head of lines) {
-    chunks.push(head)
-    offset += Buffer.byteLength(head, "utf8")
+  let y = 792 - margin
+  for (const ln of lines) {
+    page.drawText(ln, { x: margin, y, size: fontSize, font })
+    y -= fontSize + 4
+    if (y < margin) break
   }
 
-  for (const obj of objects) {
-    offsets.push(offset)
-    chunks.push(obj)
-    offset += Buffer.byteLength(obj, "utf8")
-  }
-
-  const xrefStart = offset
-  let xref = "xref\n0 6\n"
-  xref += "0000000000 65535 f \n"
-  for (let i = 1; i <= 5; i++) {
-    const off = String(offsets[i]).padStart(10, "0")
-    xref += `${off} 00000 n \n`
-  }
-
-  const trailer =
-    "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" +
-    `${xrefStart}\n%%EOF\n`
-
-  chunks.push(xref)
-  chunks.push(trailer)
-
-  const out = chunks.join("")
-  return new TextEncoder().encode(out)
+  return await pdfDoc.save()
 }
 
-export async function GET(req: NextRequest, ctx: { params: Promise<{ caseId: string; docTypeId: string }> }) {
+export async function GET(
+  req: NextRequest,
+  ctx: { params: Promise<{ caseId: string; docTypeId: string }> }
+) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
   if (!url || !anon) {
     return NextResponse.json(
-      { ok: false, error: "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY" },
+      { ok: false, error: 'Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY' },
       { status: 500 }
     )
   }
 
   const { caseId, docTypeId } = await ctx.params
 
-  // Auth: expect Supabase access token (we'll wire the client next step).
-  // For now we allow token via:
-  // 1) Authorization: Bearer <token>
-  // 2) ?token=<token> (DEV ONLY - remove later if you want)
-  const authHeader = req.headers.get("authorization") || ""
-  const headerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : null
-  const token = headerToken || req.nextUrl.searchParams.get("token")
+  // Auth: expect Supabase access token
+  const auth = req.headers.get('authorization') ?? ''
+  const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : null
   if (!token) {
-    return NextResponse.json({ ok: false, error: "Missing access token" }, { status: 401 })
+    return NextResponse.json({ ok: false, error: 'Missing bearer token' }, { status: 401 })
   }
 
-  // Create an authed Supabase client by passing the token in headers
+  // Use token to fetch user (ensures the caller is authenticated)
   const supabase = createClient(url, anon, {
     global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { persistSession: false },
   })
 
-  // Validate token
   const { data: userRes, error: userErr } = await supabase.auth.getUser()
   if (userErr || !userRes?.user) {
-    return NextResponse.json({ ok: false, error: userErr?.message ?? "Invalid token" }, { status: 401 })
+    return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 })
   }
 
-  // Load draft row (RLS enforced)
-  const { data: draft, error: dErr } = await supabase
-    .from("case_documents")
-    .select("status,generated_at,updated_at")
-    .eq("case_id", caseId)
-    .eq("document_type_id", docTypeId)
-    .maybeSingle()
+  // Optional: verify the case_document exists for this user (keeps it tight)
+  const { data: cd, error: cdErr } = await supabase
+    .from('case_documents')
+    .select('id,status,generated_at')
+    .eq('case_id', caseId)
+    .eq('document_type_id', docTypeId)
+    .single()
 
-  if (dErr) {
-    return NextResponse.json({ ok: false, error: dErr.message }, { status: 500 })
+  if (cdErr) {
+    return NextResponse.json({ ok: false, error: cdErr.message }, { status: 404 })
   }
 
-  const stamp = draft?.generated_at || draft?.updated_at || new Date().toISOString()
-  const text = `NoticePack PDF (stub)\ncase=${caseId}\ndocType=${docTypeId}\nstatus=${draft?.status ?? "none"}\ntime=${stamp}`
+  const text =
+    `NoticePack PDF (stub)\n\n` +
+    `case_id: ${caseId}\n` +
+    `document_type_id: ${docTypeId}\n` +
+    `status: ${cd?.status ?? 'unknown'}\n` +
+    `generated_at: ${cd?.generated_at ?? 'n/a'}\n\n` +
+    `Next step: real template rendering from draft JSON.\n`
 
-  const pdfBytes = makeSimplePdf(text)
+  const pdfBytes = await makeSimplePdf(text)
 
   return new NextResponse(pdfBytes, {
     status: 200,
     headers: {
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="noticepack-${caseId}-${docTypeId}.pdf"`,
-      "Cache-Control": "no-store",
+      'content-type': 'application/pdf',
+      'content-disposition': `attachment; filename="noticepack-${caseId}-${docTypeId}.pdf"`,
     },
   })
 }
-
