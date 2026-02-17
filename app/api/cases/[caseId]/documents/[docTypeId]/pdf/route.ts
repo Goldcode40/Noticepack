@@ -1,15 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { buildCaNoticeOfNonRenewalSections } from "@/lib/templates/ca/notice_of_non_renewal"
+import { renderPdfFromSections } from "@/lib/pdf/render"
 import { createClient } from '@supabase/supabase-js'
-import { PDFDocument, StandardFonts } from 'pdf-lib'
 
 type Ctx = { params: Promise<{ caseId: string; docTypeId: string }> }
 
 function getBearer(req: NextRequest): string | null {
   const h = req.headers.get('authorization') || req.headers.get('Authorization')
   if (!h) return null
-  const m = /^Bearer\s+(.+)$/i.exec(h.trim())
-  return m ? m[1] : null
+  const m = /^Bearer\s+(.+)$/i.exec(h)
+  return m?.[1] ?? null
 }
+
 
 // Simple word-wrap for PDF lines (monospace-ish approximation)
 function wrapLine(line: string, maxChars: number): string[] {
@@ -44,21 +46,26 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
   const { caseId, docTypeId } = await ctx.params
 
-  const supabase = createClient(url, anon, {
-    global: {
-      headers: (() => {
-        const token = getBearer(req)
-        return token ? { Authorization: `Bearer ${token}` } : {}
-      })(),
-    },
-  })
-
   // Require auth token (keeps endpoint protected)
   const token = getBearer(req)
   if (!token) {
-    return NextResponse.json({ ok: false, error: 'Missing Bearer token' }, { status: 401 })
+    return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 })
   }
 
+  const supabase = createClient(url, anon, {
+    global: {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  })
+
+  const { data: caseRow, error: caseErr } = await supabase
+    .from('cases')
+    .select('id,state_code')
+    .eq('id', caseId)
+    .single()
+  if (caseErr) {
+    return NextResponse.json({ ok: false, error: caseErr.message }, { status: 404 })
+  }
   // Fetch the draft + doc name (best-effort, shape depends on your Supabase relationship)
   const { data: cd, error: cdErr } = await supabase
     .from('case_documents')
@@ -118,48 +125,41 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   }
 
   lines.push('Next step: real template formatting + layout.')
+  // Build PDF (template-driven)
+  const stateCode = (caseRow as any)?.state_code ?? ''
+  const lowerName = String(docName || '').toLowerCase()
+  const sections =
+    stateCode === 'CA' && lowerName.includes('non-renewal')
+      ? buildCaNoticeOfNonRenewalSections({
+          caseId,
+          docTypeId,
+          docName,
+          status: String((cd as any)?.status ?? 'unknown'),
+          generatedAt: (cd as any)?.generated_at ?? null,
+          draft: ((cd as any)?.data ?? {}) as Record<string, any>,
+        })
+      : [{ title: docName, lines: lines }];
 
-  // Build PDF
-  const pdfDoc = await PDFDocument.create()
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
-  let page = pdfDoc.addPage([612, 792]) // Letter
-  const fontSize = 11
-  const left = 50
-  const top = 750
-  const lineHeight = 16
-  const maxChars = 110
+  try {
+    const pdfBytes = await renderPdfFromSections(sections, { title: docName })
 
-  let y = top
-
-  // Flatten lines + wrapped lines
-  const finalRows: string[] = []
-  for (const line of lines) {
-    const wrapped = wrapLine(line, maxChars)
-    for (const w of wrapped) finalRows.push(w)
+    return new NextResponse(pdfBytes, {
+      status: 200,
+      headers: {
+        'content-type': 'application/pdf',
+        'content-disposition': `attachment; filename="noticepack-${caseId}-${docTypeId}.pdf"`,
+      },
+    })
+  } catch (e: any) {
+    console.error('PDF_RENDER_ERROR', e)
+    const msg = String((e as any)?.message ?? e ?? 'unknown error')
+    const stack = String((e as any)?.stack ?? '')
+    const body = 'PDF_RENDER_ERROR:\n\n' + msg + '\n\n' + stack
+    return new NextResponse(body, {
+      status: 500,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+    })
   }
-
-  for (const row of finalRows) {
-    if (y < 60) {
-      page = pdfDoc.addPage([612, 792])
-      y = top
-    }
-    const safeRow = row.length > 0 ? row : ' '
-    page.drawText(safeRow, { x: left, y, size: fontSize, font })
-    y -= lineHeight
-  }
-
-  const pdfBytes = await pdfDoc.save()
-
-  return new NextResponse(pdfBytes, {
-    status: 200,
-    headers: {
-      'content-type': 'application/pdf',
-      'content-disposition': `attachment; filename="noticepack-${caseId}-${docTypeId}.pdf"`,
-    },
-  })
 }
-
-
-
 
 
