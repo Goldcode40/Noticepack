@@ -53,25 +53,26 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const devBypass = req.headers.get('x-dev-bypass') === '1'
   const isProd = process.env.NODE_ENV === 'production'
 
+  const allowBypass = process.env.ALLOW_DEV_BYPASS === '1'
   // In production: always require a real user JWT
   if (isProd && !token) {
     return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 })
   }
 
   // In dev: allow bypass, but ONLY if service role key is present
-  if (!token && devBypass && !isProd && !service) {
+  if (!token && devBypass && allowBypass && !isProd && !service) {
     return NextResponse.json(
       { ok: false, error: 'Dev bypass requires SUPABASE_SERVICE_ROLE_KEY in env' },
       { status: 500 }
     )
   }
 
-  if (!token && !(devBypass && !isProd)) {
+  if (!token && !(devBypass && allowBypass && !isProd)) {
     return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 })
   }
 
   // Use service role when dev bypassing (no JWT needed); otherwise use anon + user JWT header
-  const supabase = devBypass && !isProd
+  const supabase = devBypass && allowBypass && !isProd
     ? createClient(url, service!, { auth: { persistSession: false } })
     : createClient(url, anon, {
         global: { headers: { Authorization: `Bearer ${token}` } },
@@ -189,6 +190,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     })
   }
 }
+
 
 
 
