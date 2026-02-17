@@ -217,10 +217,36 @@ export default function CasePage() {
                         <button
                           type="button"
                           className="inline-flex items-center rounded border px-2 py-1 text-xs"
-                          onClick={(e) => {
-                            e.preventDefault()
-                            alert('PDF download coming next step (real PDF generation).')
-                          }}
+                          onClick={async (e) => {
+                              e.preventDefault()
+                              const supabase = supabaseClient()
+                              const { data: sessionRes } = await supabase.auth.getSession()
+                              const token = sessionRes?.session?.access_token
+                              if (!token) {
+                                alert('Not authenticated.')
+                                return
+                              }
+
+                              const res = await fetch(`/api/cases/${caseId}/documents/${d.document_type_id}/pdf`, {
+                                headers: { Authorization: `Bearer ${token}` },
+                              })
+
+                              if (!res.ok) {
+                                const msg = await res.text()
+                                alert(`PDF error: ${res.status} ${msg}`)
+                                return
+                              }
+
+                              const blob = await res.blob()
+                              const url = URL.createObjectURL(blob)
+                              const a = document.createElement('a')
+                              a.href = url
+                              a.download = `noticepack-${caseId}-${d.document_type_id}.pdf`
+                              document.body.appendChild(a)
+                              a.click()
+                              a.remove()
+                              URL.revokeObjectURL(url)
+                            }}
                         >
                           Download
                         </button>
