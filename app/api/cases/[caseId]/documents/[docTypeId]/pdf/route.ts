@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { buildFallbackSections } from "@/lib/templates/common/fallback"
 import { buildCaNoticeOfNonRenewalSections } from "@/lib/templates/ca/notice_of_non_renewal"
 import { buildCaItemizedDeductionsSections } from "@/lib/templates/ca/itemized_deductions_statement"
 import { renderPdfFromSections } from "@/lib/pdf/render"
@@ -168,7 +169,15 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           generatedAt: (cd as any)?.generated_at ?? null,
           draft: ((cd as any)?.data ?? {}) as Record<string, any>,
         })
-      : [{ title: docName, lines: lines }];
+      : buildFallbackSections({
+          caseId,
+          docTypeId,
+          docName,
+          status: String((cd as any)?.status ?? 'unknown'),
+          generatedAt: (cd as any)?.generated_at ?? null,
+          stateCode,
+          draft: ((cd as any)?.data ?? {}) as Record<string, any>,
+        });
 
     const pdfBytes = await renderPdfFromSections(sections, { title: docName })
 
@@ -190,6 +199,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     })
   }
 }
+
 
 
 
