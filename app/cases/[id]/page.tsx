@@ -213,9 +213,21 @@ export default function CasePage() {
                         <DraftBadge />
                       ) : null}
                     <CoverageBadge status={d.status} />
-                    <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
-                      {cta}
-                    </span>
+                    {draft?.status === 'generated' ? (
+                        <button
+                          type="button"
+                          className="inline-flex items-center rounded border px-2 py-1 text-xs"
+                          onClick={(e) => {
+                            e.preventDefault()
+                            alert('PDF download coming next step (real PDF generation).')
+                          }}
+                        >
+                          Download
+                        </button>
+                      ) : null}
+                      <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
+                        {cta}
+                      </span>
                   </div>
                 </div>
 
@@ -242,5 +254,6 @@ export default function CasePage() {
     </div>
   )
 }
+
 
 
