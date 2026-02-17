@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { buildCaNoticeOfNonRenewalSections } from "@/lib/templates/ca/notice_of_non_renewal"
+import { buildCaItemizedDeductionsSections } from "@/lib/templates/ca/itemized_deductions_statement"
 import { renderPdfFromSections } from "@/lib/pdf/render"
 import { createClient } from '@supabase/supabase-js'
 
@@ -128,9 +129,18 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   // Build PDF (template-driven)
   const stateCode = (caseRow as any)?.state_code ?? ''
   const lowerName = String(docName || '').toLowerCase()
-  const sections =
-    stateCode === 'CA' && lowerName.includes('non-renewal')
+  try {
+    const sections = stateCode === 'CA' && lowerName.includes('non-renewal')
       ? buildCaNoticeOfNonRenewalSections({
+          caseId,
+          docTypeId,
+          docName,
+          status: String((cd as any)?.status ?? 'unknown'),
+          generatedAt: (cd as any)?.generated_at ?? null,
+          draft: ((cd as any)?.data ?? {}) as Record<string, any>,
+        })
+      : stateCode === 'CA' && lowerName.includes('itemized deductions')
+        ? buildCaItemizedDeductionsSections({
           caseId,
           docTypeId,
           docName,
@@ -140,7 +150,6 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         })
       : [{ title: docName, lines: lines }];
 
-  try {
     const pdfBytes = await renderPdfFromSections(sections, { title: docName })
 
     return new NextResponse(pdfBytes, {
@@ -161,5 +170,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     })
   }
 }
+
+
+
 
 
