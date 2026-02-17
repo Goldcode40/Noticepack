@@ -79,6 +79,16 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     if (v === null || v === undefined) return ''
     return String(v)
   }
+  function formatDate(v: any): string {
+    if (!v) return ''
+    try {
+      const d = new Date(String(v))
+      if (isNaN(d.getTime())) return String(v)
+      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' })
+    } catch {
+      return String(v)
+    }
+  }
 
   const lines: string[] = []
   lines.push('NoticePack PDF (draft-aware stub)')
@@ -87,15 +97,15 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   lines.push('document_type_id: ' + docTypeId)
   lines.push('document_name: ' + docName)
   lines.push('status: ' + String((cd as any)?.status ?? 'unknown'))
-  lines.push('generated_at: ' + String((cd as any)?.generated_at ?? 'n/a'))
+  lines.push('generated_at: ' + formatDate((cd as any)?.generated_at ?? ''))
   lines.push('')
 
   if (docName.toLowerCase().includes('non-renewal')) {
     lines.push('--- Notice of Non-Renewal Fields (from draft) ---')
     lines.push('tenant_name: ' + safe('tenant_name'))
     lines.push('property_address: ' + safe('property_address'))
-    lines.push('notice_date: ' + (safe('notice_date') || safe('otice_date')))
-    lines.push('move_out_date: ' + safe('move_out_date'))
+    lines.push('notice_date: ' + formatDate(safe('notice_date') || safe('otice_date')))
+    lines.push('move_out_date: ' + formatDate(safe('move_out_date')))
     lines.push('landlord_name: ' + safe('landlord_name'))
     lines.push('landlord_phone: ' + safe('landlord_phone'))
     lines.push('landlord_email: ' + safe('landlord_email'))
@@ -148,3 +158,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     },
   })
 }
+
+
+
+
+
