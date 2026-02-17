@@ -25,6 +25,7 @@ type DraftRow = {
   document_type_id: string
   status: string
   updated_at: string
+  generated_at: string | null
 }
 
 function CoverageBadge({ status }: { status: CoverageStatus }) {
@@ -121,7 +122,7 @@ export default function CasePage() {
         // 4) Load drafts for this case
         const { data: d, error: dErr } = await supabase
           .from('case_documents')
-          .select('document_type_id,status,updated_at')
+          .select('document_type_id,status,updated_at,generated_at')
           .eq('case_id', caseId)
 
         if (dErr) throw dErr
@@ -190,7 +191,7 @@ export default function CasePage() {
           {docs.map((d) => {
             const draft = draftMap.get(d.document_type_id)
             const href = `/cases/${caseId}/documents/${d.document_type_id}`
-            const cta = draft ? 'Continue' : 'Start'
+            const cta = draft ? (draft.status === 'generated' ? "View / Regenerate" : "Continue") : "Start"
 
             return (
               <Link
@@ -201,7 +202,16 @@ export default function CasePage() {
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-medium">{d.doc_name}</div>
                   <div className="flex items-center gap-2">
-                    {draft ? <DraftBadge /> : null}
+                    {draft?.status === 'generated' ? (
+                        <div className="flex items-center gap-2">
+                          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">Generated</span>
+                          {draft.generated_at ? (
+                            <span className="text-xs text-muted-foreground">{new Date(draft.generated_at).toLocaleString()}</span>
+                          ) : null}
+                        </div>
+                      ) : draft ? (
+                        <DraftBadge />
+                      ) : null}
                     <CoverageBadge status={d.status} />
                     <span className="inline-flex items-center rounded border px-2 py-1 text-xs">
                       {cta}
@@ -232,3 +242,5 @@ export default function CasePage() {
     </div>
   )
 }
+
+
