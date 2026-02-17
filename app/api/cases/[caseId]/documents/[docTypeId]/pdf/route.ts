@@ -64,7 +64,7 @@ function makeSimplePdf(text: string): Uint8Array {
   return new TextEncoder().encode(out)
 }
 
-export async function GET(req: NextRequest, ctx: { params: { caseId: string; docTypeId: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ caseId: string; docTypeId: string }> }) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   if (!url || !anon) {
@@ -74,7 +74,7 @@ export async function GET(req: NextRequest, ctx: { params: { caseId: string; doc
     )
   }
 
-  const { caseId, docTypeId } = ctx.params
+  const { caseId, docTypeId } = await ctx.params
 
   // Auth: expect Supabase access token (we'll wire the client next step).
   // For now we allow token via:
@@ -124,3 +124,4 @@ export async function GET(req: NextRequest, ctx: { params: { caseId: string; doc
     },
   })
 }
+
