@@ -37,6 +37,7 @@ function wrapLine(line: string, maxChars: number): string[] {
 export async function GET(req: NextRequest, ctx: Ctx) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  const service = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (!url || !anon) {
     return NextResponse.json(
@@ -47,17 +48,35 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
   const { caseId, docTypeId } = await ctx.params
 
-  // Require auth token (keeps endpoint protected)
+  // Auth handling
   const token = getBearer(req)
-  if (!token) {
+  const devBypass = req.headers.get('x-dev-bypass') === '1'
+  const isProd = process.env.NODE_ENV === 'production'
+
+  // In production: always require a real user JWT
+  if (isProd && !token) {
     return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 })
   }
 
-  const supabase = createClient(url, anon, {
-    global: {
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  })
+  // In dev: allow bypass, but ONLY if service role key is present
+  if (!token && devBypass && !isProd && !service) {
+    return NextResponse.json(
+      { ok: false, error: 'Dev bypass requires SUPABASE_SERVICE_ROLE_KEY in env' },
+      { status: 500 }
+    )
+  }
+
+  if (!token && !(devBypass && !isProd)) {
+    return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 })
+  }
+
+  // Use service role when dev bypassing (no JWT needed); otherwise use anon + user JWT header
+  const supabase = devBypass && !isProd
+    ? createClient(url, service!, { auth: { persistSession: false } })
+    : createClient(url, anon, {
+        global: { headers: { Authorization: `Bearer ${token}` } },
+        auth: { persistSession: false },
+      });
 
   const { data: caseRow, error: caseErr } = await supabase
     .from('cases')
@@ -170,6 +189,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     })
   }
 }
+
+
+
 
 
 
